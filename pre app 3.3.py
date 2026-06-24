@@ -1,0 +1,2610 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║      MediCare Hospital Management System  –  Full CRUD Edition      ║
+║      MySQL: hospitals_db  |  Python + Tkinter + tkcalendar          ║
+║      WITH AI DISEASE PREDICTION                                    ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  pip install mysql-connector-python tkcalendar pillow reportlab     ║
+║  pip install scikit-learn pandas numpy                              ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+from tkcalendar import DateEntry
+from datetime import date, datetime
+import mysql.connector
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                Paragraph, Spacer, HRFlowable)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from PIL import Image, ImageTk, ImageDraw, ImageFilter
+import os, subprocess, sys, math
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+import pickle
+import json
+
+# ──────────────────────────────────────────────────────────────────────
+#  DB CONFIG  ← edit password
+# ──────────────────────────────────────────────────────────────────────
+DB_CONFIG = dict(host="localhost", user="root",
+                 password="nive2530", database="hospitals_db")
+
+# ──────────────────────────────────────────────────────────────────────
+#  PALETTE
+# ──────────────────────────────────────────────────────────────────────
+NAVY = "#0A1628";
+BLUE = "#1A3A6B";
+ACCENT = "#00C2FF"
+TEAL = "#00897B";
+WHITE = "#F0F4FF";
+SILVER = "#B0BEC5"
+RED = "#E53935";
+GREEN = "#43A047";
+ORANGE = "#FB8C00"
+CARD = "#0F1E3A";
+TEXT = "#E8EDF7";
+SUBTEXT = "#78909C"
+BORDER = "#1E3A6E";
+PURPLE = "#7B1FA2";
+GOLD = "#F9A825"
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  DB HELPERS
+# ──────────────────────────────────────────────────────────────────────
+def get_conn():
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def run(sql, params=(), fetch=False):
+    conn = get_conn();
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    result = cur.fetchall() if fetch else None
+    if not fetch: conn.commit()
+    conn.close();
+    return result
+
+
+def run_one(sql, params=()):
+    r = run(sql, params, fetch=True)
+    return r[0] if r else None
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  ML MODEL FOR DISEASE PREDICTION
+# ──────────────────────────────────────────────────────────────────────
+class DiseasePredictor:
+    # Exact feature columns the model is trained and predicted with
+    FEATURE_COLS = ['age', 'gender_encoded', 'fever', 'cough',
+                    'headache', 'fatigue', 'chest_pain', 'shortness_breath', 'nausea']
+
+    def __init__(self):
+        self.model        = None
+        self.is_trained   = False
+        self.model_path   = "disease_prediction_model.pkl"
+        # Always delete stale pkl so a mismatched model never causes feature errors
+        for p in [self.model_path, "label_encoder.pkl"]:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        self.train_model()
+
+    # ------------------------------------------------------------------
+    def train_model(self):
+        """Build training data in memory and fit the model."""
+        try:
+            # ── large, balanced synthetic dataset (no DB dependency) ──
+            rows = [
+                # age, gender_encoded(0=M,1=F), fever,cough,headache,fatigue,chest_pain,shortness_breath,nausea, disease
+                # Common Cold
+                (40,0,1,1,0,1,0,0,0,'Common Cold'),(35,1,1,1,0,1,0,0,0,'Common Cold'),
+                (28,0,1,1,1,1,0,0,0,'Common Cold'),(22,1,1,1,0,0,0,0,0,'Common Cold'),
+                (50,0,1,1,0,1,0,0,0,'Common Cold'),(60,1,1,1,0,1,0,0,0,'Common Cold'),
+                # Flu
+                (23,1,1,1,1,1,0,0,0,'Flu'),(30,0,1,1,1,1,0,0,1,'Flu'),
+                (45,1,1,1,1,1,0,0,0,'Flu'),(19,0,1,1,1,1,0,0,1,'Flu'),
+                (55,1,1,1,1,1,0,0,0,'Flu'),(38,0,1,1,1,1,0,0,1,'Flu'),
+                # Migraine
+                (32,1,0,0,1,1,0,0,1,'Migraine'),(27,1,0,0,1,1,0,0,1,'Migraine'),
+                (44,0,0,0,1,1,0,0,0,'Migraine'),(36,1,1,0,1,1,0,0,1,'Migraine'),
+                (29,1,0,0,1,0,0,0,1,'Migraine'),(52,0,0,0,1,1,0,0,0,'Migraine'),
+                # Pneumonia
+                (58,0,1,1,0,1,1,1,0,'Pneumonia'),(65,0,1,1,0,1,1,1,0,'Pneumonia'),
+                (70,1,1,1,0,1,1,1,0,'Pneumonia'),(48,0,1,1,0,1,0,1,0,'Pneumonia'),
+                (60,1,1,1,0,1,1,1,0,'Pneumonia'),(55,0,1,1,0,1,1,1,0,'Pneumonia'),
+                # Anxiety
+                (28,1,0,0,1,1,0,0,0,'Anxiety'),(24,0,0,0,1,1,0,0,0,'Anxiety'),
+                (33,1,0,0,1,1,0,0,1,'Anxiety'),(40,0,0,0,1,1,0,0,0,'Anxiety'),
+                (22,1,0,0,0,1,0,0,1,'Anxiety'),(31,0,0,0,1,1,0,0,0,'Anxiety'),
+                # Heart Disease
+                (65,0,0,0,0,1,1,1,0,'Heart Disease'),(70,0,1,0,0,1,1,1,0,'Heart Disease'),
+                (60,0,0,0,0,1,1,1,0,'Heart Disease'),(72,1,0,0,0,1,1,1,0,'Heart Disease'),
+                (68,0,0,0,1,1,1,1,0,'Heart Disease'),(75,0,0,0,0,1,1,1,0,'Heart Disease'),
+                # Hypertension
+                (55,0,0,0,1,1,1,0,0,'Hypertension'),(60,0,0,0,1,1,0,0,0,'Hypertension'),
+                (50,1,0,0,1,1,0,0,0,'Hypertension'),(65,0,0,0,1,1,1,0,0,'Hypertension'),
+                (58,0,0,0,1,0,1,0,0,'Hypertension'),(62,1,0,0,1,1,0,0,0,'Hypertension'),
+                # Asthma
+                (38,1,0,1,0,1,0,1,0,'Asthma'),(25,0,0,1,0,1,0,1,0,'Asthma'),
+                (42,1,1,1,0,1,0,1,0,'Asthma'),(30,0,0,1,0,0,0,1,0,'Asthma'),
+                (35,1,0,1,0,1,0,1,0,'Asthma'),(47,0,0,1,0,1,0,1,0,'Asthma'),
+                # Bronchitis
+                (35,1,0,1,1,1,0,0,0,'Bronchitis'),(40,0,1,1,0,1,0,1,0,'Bronchitis'),
+                (28,1,0,1,1,1,0,0,0,'Bronchitis'),(52,0,1,1,0,1,0,0,0,'Bronchitis'),
+                (44,1,0,1,1,1,0,1,0,'Bronchitis'),(33,0,0,1,1,1,0,0,0,'Bronchitis'),
+                # Diabetes
+                (50,0,0,0,1,1,0,0,0,'Diabetes'),(55,1,0,0,0,1,0,0,0,'Diabetes'),
+                (60,0,0,0,1,1,0,0,1,'Diabetes'),(48,0,0,0,0,1,0,0,0,'Diabetes'),
+                (65,1,0,0,1,1,0,0,0,'Diabetes'),(52,0,0,0,1,1,0,0,1,'Diabetes'),
+                # Gastritis
+                (42,0,1,0,1,1,0,0,1,'Gastritis'),(37,1,0,0,1,1,0,0,1,'Gastritis'),
+                (30,0,0,0,1,0,0,0,1,'Gastritis'),(45,1,1,0,1,1,0,0,1,'Gastritis'),
+                (28,0,0,0,0,1,0,0,1,'Gastritis'),(50,1,0,0,1,1,0,0,1,'Gastritis'),
+                # Food Poisoning
+                (29,1,1,0,1,0,0,0,1,'Food Poisoning'),(25,0,1,0,0,0,0,0,1,'Food Poisoning'),
+                (33,1,1,0,1,1,0,0,1,'Food Poisoning'),(20,0,0,0,0,0,0,0,1,'Food Poisoning'),
+                (40,1,1,0,1,0,0,0,1,'Food Poisoning'),(35,0,1,0,0,1,0,0,1,'Food Poisoning'),
+                # COVID-19
+                (62,0,1,1,1,1,1,1,0,'COVID-19'),(45,1,1,1,1,1,0,1,0,'COVID-19'),
+                (38,0,1,1,1,1,1,1,0,'COVID-19'),(55,1,1,1,1,1,0,1,0,'COVID-19'),
+                (70,0,1,1,1,1,1,1,0,'COVID-19'),(50,1,1,1,0,1,1,1,0,'COVID-19'),
+                # Allergy
+                (41,1,0,1,1,0,0,0,0,'Allergy'),(30,0,0,1,1,0,0,0,1,'Allergy'),
+                (25,1,0,1,0,0,0,0,0,'Allergy'),(35,0,0,1,1,0,0,0,0,'Allergy'),
+                (48,1,0,1,1,1,0,0,0,'Allergy'),(22,0,0,1,0,0,0,0,0,'Allergy'),
+                # Acid Reflux
+                (48,0,0,0,0,1,1,0,1,'Acid Reflux'),(42,1,0,0,0,1,1,0,1,'Acid Reflux'),
+                (55,0,0,0,0,0,1,0,1,'Acid Reflux'),(38,1,0,0,0,1,0,0,1,'Acid Reflux'),
+                (50,0,0,0,0,1,1,0,1,'Acid Reflux'),(44,1,0,0,0,0,1,0,1,'Acid Reflux'),
+            ]
+
+            df = pd.DataFrame(rows, columns=self.FEATURE_COLS + ['disease_name'])
+            X  = df[self.FEATURE_COLS]
+            y  = df['disease_name']
+
+            self.model = RandomForestClassifier(
+                n_estimators=200, random_state=42,
+                max_depth=None, min_samples_leaf=1)
+            self.model.fit(X, y)
+            self.is_trained = True
+
+            acc = accuracy_score(y, self.model.predict(X))
+            print(f"Model trained successfully — training accuracy: {acc:.2%}")
+
+        except Exception as e:
+            print(f"Error training model: {e}")
+            self.is_trained = False
+
+    # ------------------------------------------------------------------
+    def predict_disease(self, patient_data):
+        """Predict disease from a dict with keys matching FEATURE_COLS."""
+        if not self.is_trained or self.model is None:
+            return "Model not ready. Please restart the application.", 0
+        try:
+            row = {col: patient_data.get(col, 0) for col in self.FEATURE_COLS}
+            X   = pd.DataFrame([row])[self.FEATURE_COLS]
+            prediction  = self.model.predict(X)[0]
+            probs       = self.model.predict_proba(X)[0]
+            confidence  = float(max(probs)) * 100
+            return prediction, confidence
+        except Exception as e:
+            print(f"Prediction error: {e}")
+            return f"Prediction error: {str(e)}", 0
+
+    # ------------------------------------------------------------------
+    def get_disease_probabilities(self, patient_data):
+        """Return {disease: probability%} sorted descending."""
+        if not self.is_trained or self.model is None:
+            return {}
+        try:
+            row  = {col: patient_data.get(col, 0) for col in self.FEATURE_COLS}
+            X    = pd.DataFrame([row])[self.FEATURE_COLS]
+            probs = self.model.predict_proba(X)[0]
+            prob_dict = {d: p * 100 for d, p in zip(self.model.classes_, probs)}
+            return dict(sorted(prob_dict.items(), key=lambda x: x[1], reverse=True))
+        except Exception as e:
+            print(f"Error getting probabilities: {e}")
+            return {}
+
+
+# Create global predictor instance
+predictor = DiseasePredictor()
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  BACKGROUND IMAGE GENERATOR  (no external file needed)
+# ──────────────────────────────────────────────────────────────────────
+def make_login_bg(w=1200, h=750):
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(h):
+        for x in range(w):
+            t = y / h
+            r = int(4 + 18 * t + 10 * math.sin(x / 200) ** 2)
+            g = int(13 + 25 * t + 5 * math.cos(y / 150) ** 2)
+            b = int(26 + 55 * t + 8 * math.sin((x + y) / 300) ** 2)
+            px[x, y] = (min(r, 80), min(g, 80), min(b, 120))
+    draw = ImageDraw.Draw(img, "RGBA")
+    # Glowing orbs
+    for cx, cy, rad, col in [(220, 180, 260, (0, 194, 255, 25)),
+                             (920, 520, 220, (0, 137, 123, 20)),
+                             (580, 380, 320, (0, 194, 255, 12))]:
+        for dr in range(rad, 0, -8):
+            a = int(col[3] * (1 - dr / rad))
+            draw.ellipse([cx - dr, cy - dr, cx + dr, cy + dr], fill=(*col[:3], a))
+    # Grid
+    for x in range(0, w, 55):
+        draw.line([(x, 0), (x, h)], fill=(0, 100, 180, 18))
+    for y in range(0, h, 55):
+        draw.line([(0, y), (w, y)], fill=(0, 100, 180, 18))
+    # Dots
+    for row in range(0, h, 52):
+        for col in range(0, w, 58):
+            ox = 29 if (row // 52) % 2 else 0
+            draw.ellipse([col + ox - 2, row - 2, col + ox + 2, row + 2], fill=(0, 194, 255, 55))
+    # Medical cross icons
+    for (px2, py2) in [(130, 90), (990, 130), (90, 610), (1110, 410), (510, 690), (710, 110)]:
+        sz = 16;
+        th = 4
+        draw.rectangle([px2 - th, py2 - sz, px2 + th, py2 + sz], fill=(0, 194, 255, 110))
+        draw.rectangle([px2 - sz, py2 - th, px2 + sz, py2 + th], fill=(0, 194, 255, 110))
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
+    return img
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  PDF RECEIPT
+# ──────────────────────────────────────────────────────────────────────
+def gen_receipt(bill: dict, path: str):
+    doc = SimpleDocTemplate(path, pagesize=A4,
+                            rightMargin=2 * cm, leftMargin=2 * cm,
+                            topMargin=2 * cm, bottomMargin=2 * cm)
+    S = getSampleStyleSheet()
+    story = []
+    H1 = ParagraphStyle("h1", fontSize=22, fontName="Helvetica-Bold",
+                        textColor=colors.HexColor("#0A1628"), alignment=TA_CENTER, spaceAfter=4)
+    SUB = ParagraphStyle("sub", fontSize=10, textColor=colors.HexColor("#1A3A6B"),
+                         alignment=TA_CENTER, spaceAfter=2)
+    story += [Paragraph("🏥  MediCare Hospital", H1),
+              Paragraph("123 Health Ave, Chennai 600001 | +91-044-12345678 | GST: 33AAAAA0000A1Z5", SUB),
+              HRFlowable(width="100%", thickness=2, color=colors.HexColor("#00C2FF")),
+              Spacer(1, 0.3 * cm)]
+    meta = [["Bill ID", f"# {bill.get('bill_id', '-')}", "Date", str(bill.get('bill_date', date.today()))],
+            ["Patient ID", str(bill.get('patient_id', '-')), "Status", bill.get('payment_status', 'Pending')]]
+    mt = Table(meta, colWidths=[3 * cm, 6 * cm, 3 * cm, 5 * cm])
+    mt.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+                            ("FONTSIZE", (0, 0), (-1, -1), 10),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B0BEC5")),
+                            ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#E8EDF7"), colors.white]),
+                            ("PADDING", (0, 0), (-1, -1), 8)]))
+    story += [mt, Spacer(1, 0.4 * cm)]
+    ch_head = ParagraphStyle("ch", fontSize=13, fontName="Helvetica-Bold",
+                             textColor=colors.HexColor("#0A1628"), spaceAfter=4)
+    story.append(Paragraph("Billing Details", ch_head))
+    charges = bill.get("charges", [["Consultation Fee", "₹ 500.00"],
+                                   ["Room Charges", "₹ 1,500.00"],
+                                   ["Medicines", "₹ 300.00"],
+                                   ["Tests / Lab", "₹ 200.00"]])
+    td = [["Description", "Amount"]] + charges + [["", ""], ["TOTAL", f"₹ {bill.get('total_amount', 0):,.2f}"]]
+    t = Table(td, colWidths=[12 * cm, 5 * cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0A1628")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F0F4FF")]),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#00897B")),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -2), 0.5, colors.HexColor("#B0BEC5")),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.5, colors.HexColor("#00C2FF")),
+        ("PADDING", (0, 0), (-1, -1), 9)]))
+    story += [t, Spacer(1, 0.8 * cm),
+              HRFlowable(width="100%", thickness=1, color=colors.HexColor("#B0BEC5"))]
+    FT = ParagraphStyle("ft", fontSize=9, textColor=colors.HexColor("#607D8B"),
+                        alignment=TA_CENTER, spaceAfter=2)
+    story += [Spacer(1, 0.2 * cm),
+              Paragraph("Thank you for choosing MediCare Hospital. Wishing you good health!", FT),
+              Paragraph("Computer-generated receipt – no signature required.", FT)]
+    doc.build(story)
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  WIDGET HELPERS
+# ──────────────────────────────────────────────────────────────────────
+def _ttk_style():
+    s = ttk.Style()
+    s.theme_use("clam")
+    s.configure("TV.Treeview", background=NAVY, foreground=WHITE,
+                rowheight=26, fieldbackground=NAVY, font=("Segoe UI", 9))
+    s.configure("TV.Treeview.Heading", background=BLUE, foreground=ACCENT,
+                font=("Segoe UI", 9, "bold"), relief="flat")
+    s.map("TV.Treeview", background=[("selected", ACCENT)],
+          foreground=[("selected", NAVY)])
+    s.configure("TCombobox",
+                fieldbackground="#0E1E3A", background=BLUE,
+                foreground=WHITE, selectbackground=BLUE,
+                selectforeground=WHITE, insertcolor=WHITE,
+                arrowcolor=ACCENT, bordercolor=BORDER,
+                lightcolor="#0E1E3A", darkcolor="#0E1E3A")
+    s.map("TCombobox",
+          fieldbackground=[("readonly", "#0E1E3A"), ("disabled", CARD),
+                           ("active", "#0E1E3A"), ("focus", "#0E1E3A")],
+          foreground=[("readonly", WHITE), ("disabled", SILVER),
+                      ("active", WHITE), ("focus", WHITE)],
+          selectbackground=[("readonly", BLUE)],
+          selectforeground=[("readonly", WHITE)])
+
+
+def slabel(p, text):
+    tk.Label(p, text=text, bg=CARD, fg=ACCENT,
+             font=("Segoe UI", 10, "bold")).pack(pady=(12, 3), anchor="w", padx=12)
+
+
+def flabel(p, text):
+    tk.Label(p, text=text, bg=CARD, fg=SILVER, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
+
+
+def ewidget(p, var=None):
+    e = tk.Entry(p, textvariable=var, bg="#0E1E3A", fg=WHITE,
+                 insertbackground=ACCENT, relief="flat",
+                 font=("Segoe UI", 10), highlightthickness=1,
+                 highlightbackground=BORDER, highlightcolor=ACCENT,
+                 selectbackground=BLUE, selectforeground=WHITE)
+    e.pack(fill="x", padx=14, pady=(0, 5), ipady=5)
+    return e
+
+
+def cwidget(p, values, var=None, w=28):
+    c = ttk.Combobox(p, values=values, textvariable=var, width=w,
+                     font=("Segoe UI", 10), state="readonly")
+    c.pack(fill="x", padx=14, pady=(0, 5), ipady=3)
+    return c
+
+
+def dwidget(p, var=None):
+    d = DateEntry(p, textvariable=var, background=BLUE, foreground=WHITE,
+                  selectbackground=ACCENT, selectforeground=NAVY,
+                  normalbackground="#0E1E3A", normalforeground=WHITE,
+                  headersbackground=NAVY, headersforeground=ACCENT,
+                  weekendforeground=ORANGE, othermonthforeground=SUBTEXT,
+                  borderwidth=0, font=("Segoe UI", 10), date_pattern="yyyy-mm-dd")
+    d.pack(fill="x", padx=14, pady=(0, 5), ipady=4)
+    # Force the inner Entry widget to show white text on dark bg
+    d.configure(style="DateEntry")
+    inner = d._entry if hasattr(d, "_entry") else d
+    try:
+        inner.configure(bg="#0E1E3A", fg=WHITE, insertbackground=ACCENT,
+                        selectbackground=BLUE, selectforeground=WHITE,
+                        relief="flat", highlightthickness=1,
+                        highlightbackground=BORDER, highlightcolor=ACCENT)
+    except Exception:
+        pass
+    return d
+
+
+def btn(p, text, cmd, bg=TEAL, fg=WHITE, w=18):
+    b = tk.Button(p, text=text, command=cmd, bg=bg, fg=fg,
+                  font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
+                  cursor="hand2", activebackground=ACCENT,
+                  activeforeground=NAVY, padx=8, pady=6, width=w)
+    b.pack(pady=3, padx=10)
+    return b
+
+
+def make_tree(p, cols, widths):
+    f = tk.Frame(p, bg=NAVY);
+    f.pack(fill="both", expand=True, padx=6, pady=4)
+    sb = tk.Scrollbar(f, orient="vertical", bg=BLUE, troughcolor=NAVY)
+    sb.pack(side="right", fill="y")
+    sbx = tk.Scrollbar(f, orient="horizontal", bg=BLUE, troughcolor=NAVY)
+    sbx.pack(side="bottom", fill="x")
+    tree = ttk.Treeview(f, columns=cols, show="headings",
+                        yscrollcommand=sb.set, xscrollcommand=sbx.set,
+                        style="TV.Treeview")
+    sb.config(command=tree.yview);
+    sbx.config(command=tree.xview)
+    for i, c in enumerate(cols):
+        tree.heading(c, text=c)
+        tree.column(c, width=widths[i] if widths else 110, anchor="center")
+    tree.pack(fill="both", expand=True)
+    tree.tag_configure("odd", background="#0D1A32")
+    tree.tag_configure("even", background=NAVY)
+    return tree
+
+
+def fill_tree(tree, rows):
+    tree.delete(*tree.get_children())
+    for i, r in enumerate(rows):
+        tree.insert("", "end", values=r, tags=("odd" if i % 2 else "even",))
+
+
+def page_hdr(p, title, icon):
+    tk.Label(p, text=f"{icon}  {title}", bg=NAVY, fg=WHITE,
+             font=("Segoe UI", 15, "bold"), anchor="w").pack(fill="x", padx=18, pady=(14, 4))
+    tk.Frame(p, bg=ACCENT, height=2).pack(fill="x", padx=18, pady=(0, 8))
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  CRUD MIXIN  – generic edit dialog
+# ──────────────────────────────────────────────────────────────────────
+class CRUDMixin:
+    """Gives any page Save / Edit / Delete / Clear buttons and an edit dialog."""
+
+    def _crud_buttons(self, form, save_fn, edit_fn, delete_fn, clear_fn):
+        btn(form, "💾  Save / Add", save_fn, TEAL)
+        btn(form, "✏️  Edit Selected", edit_fn, BLUE)
+        btn(form, "🗑️  Delete Selected", delete_fn, RED)
+        btn(form, "🔄  Clear Form", clear_fn, "#455A64")
+
+    def _confirm_delete(self, label="record"):
+        return messagebox.askyesno("Confirm Delete",
+                                   f"Permanently delete this {label}?")
+
+    def _no_selection(self):
+        messagebox.showwarning("No Selection", "Please select a row first.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  NEW: DISEASE PREDICTION PAGE
+# ══════════════════════════════════════════════════════════════════════
+class DiseasePredictionPage(tk.Frame):
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb
+        self.patient_id = None
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "AI Disease Prediction", "🔮")
+
+        # ── PREDICT DISEASE button at the very top ──
+        top_bar = tk.Frame(self, bg=NAVY)
+        top_bar.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Button(top_bar, text="🔮  PREDICT DISEASE",
+                  command=self.predict_disease,
+                  bg=ACCENT, fg=NAVY, font=("Segoe UI", 13, "bold"),
+                  relief="flat", cursor="hand2", padx=30, pady=10).pack(side="left")
+
+        # ── Main container: two equal columns filling the window ──
+        main_container = tk.Frame(self, bg=NAVY)
+        main_container.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        main_container.columnconfigure(0, weight=1)
+        main_container.columnconfigure(1, weight=1)
+        main_container.rowconfigure(0, weight=1)
+
+        # ── LEFT PANEL (scrollable) ──
+        left_outer = tk.Frame(main_container, bg=CARD,
+                              highlightthickness=1, highlightbackground=BORDER)
+        left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        left_canvas = tk.Canvas(left_outer, bg=CARD, highlightthickness=0)
+        left_sb = tk.Scrollbar(left_outer, orient="vertical", command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_sb.set)
+        left_sb.pack(side="right", fill="y")
+        left_canvas.pack(side="left", fill="both", expand=True)
+
+        left_panel = tk.Frame(left_canvas, bg=CARD)
+        left_win = left_canvas.create_window((0, 0), window=left_panel, anchor="nw")
+
+        def _resize_left(e):
+            left_canvas.itemconfig(left_win, width=e.width)
+        left_canvas.bind("<Configure>", _resize_left)
+        left_panel.bind("<Configure>",
+                        lambda e: left_canvas.configure(
+                            scrollregion=left_canvas.bbox("all")))
+
+        # ── RIGHT PANEL (scrollable) ──
+        right_outer = tk.Frame(main_container, bg=CARD,
+                               highlightthickness=1, highlightbackground=BORDER)
+        right_outer.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        right_canvas = tk.Canvas(right_outer, bg=CARD, highlightthickness=0)
+        right_sb = tk.Scrollbar(right_outer, orient="vertical", command=right_canvas.yview)
+        right_canvas.configure(yscrollcommand=right_sb.set)
+        right_sb.pack(side="right", fill="y")
+        right_canvas.pack(side="left", fill="both", expand=True)
+
+        right_panel = tk.Frame(right_canvas, bg=CARD)
+        right_win = right_canvas.create_window((0, 0), window=right_panel, anchor="nw")
+
+        def _resize_right(e):
+            right_canvas.itemconfig(right_win, width=e.width)
+        right_canvas.bind("<Configure>", _resize_right)
+        right_panel.bind("<Configure>",
+                         lambda e: right_canvas.configure(
+                             scrollregion=right_canvas.bbox("all")))
+
+        # ════════════ LEFT PANEL CONTENT ════════════
+
+        slabel(left_panel, "Patient Information")
+        tk.Label(left_panel, text="Select Patient:", bg=CARD, fg=SILVER,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(5, 0))
+
+        self.patient_combo = ttk.Combobox(left_panel, font=("Segoe UI", 10), width=35)
+        self.patient_combo.pack(fill="x", padx=14, pady=5)
+        self.patient_combo.bind('<<ComboboxSelected>>', self.on_patient_select)
+
+        btn(left_panel, "🔄 Refresh Patient List", self.load_patients, BLUE, WHITE, 25)
+
+        self.patient_info_frame = tk.Frame(left_panel, bg="#0E1E3A",
+                                           highlightthickness=1,
+                                           highlightbackground=BORDER)
+        self.patient_info_frame.pack(fill="x", padx=14, pady=8)
+        self.patient_info_label = tk.Label(self.patient_info_frame,
+                                           text="No patient selected",
+                                           bg="#0E1E3A", fg=SILVER,
+                                           font=("Segoe UI", 9), justify="left")
+        self.patient_info_label.pack(pady=10, padx=10, anchor="w")
+
+        tk.Frame(left_panel, bg=BORDER, height=1).pack(fill="x", padx=14, pady=8)
+
+        # Symptoms
+        slabel(left_panel, "Symptoms Assessment")
+        symptom_frame = tk.Frame(left_panel, bg=CARD)
+        symptom_frame.pack(fill="x", padx=14, pady=5)
+        symptom_frame.columnconfigure(0, weight=1)
+        symptom_frame.columnconfigure(1, weight=1)
+
+        symptoms = [
+            ("🌡  Fever",            "fever_var"),
+            ("😷  Cough",            "cough_var"),
+            ("🤕  Headache",         "headache_var"),
+            ("😴  Fatigue",          "fatigue_var"),
+            ("💔  Chest Pain",       "chest_pain_var"),
+            ("🌬  Shortness of Breath", "shortness_breath_var"),
+            ("🤢  Nausea",           "nausea_var"),
+        ]
+        self.symptom_vars = {}
+        for i, (label, var_name) in enumerate(symptoms):
+            var = tk.IntVar()
+            self.symptom_vars[var_name] = var
+            tk.Checkbutton(symptom_frame, text=label, variable=var,
+                           bg=CARD, fg=WHITE, selectcolor=TEAL,
+                           activebackground=CARD, activeforeground=ACCENT,
+                           font=("Segoe UI", 10)
+                           ).grid(row=i // 2, column=i % 2,
+                                  padx=10, pady=6, sticky="w")
+
+        tk.Frame(left_panel, bg=BORDER, height=1).pack(fill="x", padx=14, pady=8)
+
+        # Age & Gender
+        slabel(left_panel, "Additional Information")
+
+        age_frame = tk.Frame(left_panel, bg=CARD)
+        age_frame.pack(fill="x", padx=14, pady=4)
+        tk.Label(age_frame, text="Age:", bg=CARD, fg=SILVER,
+                 font=("Segoe UI", 10), width=10, anchor="w").pack(side="left")
+        self.age_entry = tk.Entry(age_frame, bg="#0E1E3A", fg=WHITE,
+                                  insertbackground=ACCENT,
+                                  font=("Segoe UI", 10), width=18,
+                                  relief="flat",
+                                  highlightthickness=1,
+                                  highlightbackground=BORDER,
+                                  highlightcolor=ACCENT)
+        self.age_entry.pack(side="left", padx=5, ipady=4)
+
+        gender_frame = tk.Frame(left_panel, bg=CARD)
+        gender_frame.pack(fill="x", padx=14, pady=4)
+        tk.Label(gender_frame, text="Gender:", bg=CARD, fg=SILVER,
+                 font=("Segoe UI", 10), width=10, anchor="w").pack(side="left")
+        self.gender_var = tk.StringVar()
+        ttk.Combobox(gender_frame, textvariable=self.gender_var,
+                     values=["Male", "Female"], width=16,
+                     font=("Segoe UI", 10), state="readonly"
+                     ).pack(side="left", padx=5)
+
+        tk.Frame(left_panel, bg=BORDER, height=1).pack(fill="x", padx=14, pady=10)
+
+        # Save button
+        self.save_btn = tk.Button(left_panel,
+                                  text="💾  Save Prediction to Patient Record",
+                                  command=self.save_prediction,
+                                  bg=TEAL, fg=WHITE, font=("Segoe UI", 10, "bold"),
+                                  relief="flat", cursor="hand2", state="disabled",
+                                  pady=8)
+        self.save_btn.pack(fill="x", padx=14, pady=(0, 14))
+
+        # ════════════ RIGHT PANEL CONTENT ════════════
+
+        slabel(right_panel, "Prediction Results")
+
+        # ── Disease name card ──
+        disease_card = tk.Frame(right_panel, bg="#0E1E3A",
+                                highlightthickness=2, highlightbackground=ACCENT)
+        disease_card.pack(fill="x", padx=14, pady=(4, 6))
+
+        self.prediction_label = tk.Label(disease_card,
+                                         text="Waiting for prediction…",
+                                         bg="#0E1E3A", fg=ACCENT,
+                                         font=("Segoe UI", 15, "bold"),
+                                         wraplength=500, justify="center")
+        self.prediction_label.pack(pady=(18, 6), padx=10)
+
+        # ── Confidence score badge ──
+        conf_frame = tk.Frame(disease_card, bg="#0E1E3A")
+        conf_frame.pack(pady=(0, 14))
+
+        tk.Label(conf_frame, text="Confidence Score:",
+                 bg="#0E1E3A", fg=SILVER,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(0, 8))
+
+        self.confidence_badge = tk.Label(conf_frame, text="—",
+                                         bg=CARD, fg=WHITE,
+                                         font=("Segoe UI", 13, "bold"),
+                                         padx=16, pady=4, relief="flat")
+        self.confidence_badge.pack(side="left")
+
+        self.confidence_label = tk.Label(disease_card, text="",
+                                         bg="#0E1E3A", fg=GREEN,
+                                         font=("Segoe UI", 10))
+        self.confidence_label.pack(pady=(0, 10))
+
+        # ── Probability distribution ──
+        tk.Frame(right_panel, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(4, 0))
+        slabel(right_panel, "Disease Probability Distribution")
+
+        self.prob_text = tk.Text(right_panel, bg="#0A1220", fg=WHITE,
+                                 font=("Consolas", 10), height=10,
+                                 relief="flat", wrap=tk.WORD,
+                                 padx=8, pady=6)
+        self.prob_text.pack(fill="x", padx=14, pady=(0, 6))
+
+        # ── Recommendations ──
+        tk.Frame(right_panel, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(4, 0))
+        slabel(right_panel, "Recommendations")
+
+        self.recommend_text = tk.Text(right_panel, bg="#0A1220", fg=WHITE,
+                                      font=("Segoe UI", 9), height=8,
+                                      relief="flat", wrap=tk.WORD,
+                                      padx=8, pady=6)
+        self.recommend_text.pack(fill="x", padx=14, pady=(0, 14))
+
+        # Load patients
+        self.load_patients()
+
+    def load_patients(self):
+        """Load patient list into combo box"""
+        try:
+            patients = run("SELECT patient_id, patient_name, age, gender FROM patient_s ORDER BY patient_name",
+                           fetch=True)
+            patient_list = [f"{p[0]} - {p[1]} (Age: {p[2]})" for p in patients]
+            self.patient_combo['values'] = patient_list
+            self.patient_data = {
+                f"{p[0]} - {p[1]} (Age: {p[2]})": {'id': p[0], 'name': p[1], 'age': p[2], 'gender': p[3]}
+                for p in patients}
+            self.status(f"Loaded {len(patients)} patients")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load patients: {e}")
+
+    def on_patient_select(self, event):
+        """Handle patient selection"""
+        selection = self.patient_combo.get()
+        if selection and selection in self.patient_data:
+            patient = self.patient_data[selection]
+            self.patient_id = patient['id']
+            self.age_entry.delete(0, tk.END)
+            self.age_entry.insert(0, patient['age'])
+            self.gender_var.set(patient['gender'])
+
+            # Update patient info display
+            info_text = f"Patient: {patient['name']}\nAge: {patient['age']}\nGender: {patient['gender']}"
+            self.patient_info_label.config(text=info_text, fg=ACCENT)
+            self.save_btn.config(state="normal")
+            self.status(f"Selected patient: {patient['name']}")
+
+    def predict_disease(self):
+        """Perform disease prediction"""
+        try:
+            # Get inputs
+            age = self.age_entry.get()
+            if not age:
+                messagebox.showwarning("Warning", "Please enter age or select a patient")
+                return
+
+            age = int(age)
+            gender = self.gender_var.get()
+            if not gender:
+                messagebox.showwarning("Warning", "Please select gender")
+                return
+
+            # Get symptoms
+            fever = self.symptom_vars['fever_var'].get()
+            cough = self.symptom_vars['cough_var'].get()
+            headache = self.symptom_vars['headache_var'].get()
+            fatigue = self.symptom_vars['fatigue_var'].get()
+            chest_pain = self.symptom_vars['chest_pain_var'].get()
+            shortness_breath = self.symptom_vars['shortness_breath_var'].get()
+            nausea = self.symptom_vars['nausea_var'].get()
+
+            # Encode gender
+            gender_encoded = 0 if gender == 'Male' else 1
+
+            # Prepare data for prediction
+            patient_data = {
+                'age': age,
+                'gender_encoded': gender_encoded,
+                'fever': fever,
+                'cough': cough,
+                'headache': headache,
+                'fatigue': fatigue,
+                'chest_pain': chest_pain,
+                'shortness_breath': shortness_breath,
+                'nausea': nausea
+            }
+
+            # Get prediction
+            disease, confidence = predictor.predict_disease(patient_data)
+
+            # Update UI
+            self.prediction_label.config(text=f"Predicted Disease: {disease}")
+
+            # Color code confidence
+            if confidence >= 80:
+                conf_color = GREEN
+                confidence_text = f"Confidence: {confidence:.1f}% (High)"
+            elif confidence >= 60:
+                conf_color = ORANGE
+                confidence_text = f"Confidence: {confidence:.1f}% (Medium)"
+            else:
+                conf_color = RED
+                confidence_text = f"Confidence: {confidence:.1f}% (Low - Please consult doctor)"
+
+            self.confidence_label.config(text=confidence_text, fg=conf_color)
+            # Update the prominent confidence badge
+            self.confidence_badge.config(
+                text=f"{confidence:.1f}%",
+                bg=conf_color, fg=NAVY if conf_color == GREEN else WHITE)
+
+            # Get probability distribution
+            probabilities = predictor.get_disease_probabilities(patient_data)
+
+            # Display probabilities
+            self.prob_text.delete(1.0, tk.END)
+            self.prob_text.insert(tk.END, f" {'DISEASE':<26} {'PROB':>6}  {'BAR'}\n")
+            self.prob_text.insert(tk.END, "─" * 52 + "\n")
+
+            for i, (disease_name, prob) in enumerate(list(probabilities.items())[:10]):
+                bar = "█" * int(prob / 2)
+                marker = " ◀" if i == 0 else ""
+                self.prob_text.insert(tk.END,
+                    f" {disease_name[:26]:<26} {prob:5.1f}%  {bar}{marker}\n")
+
+            # Generate recommendations
+            self.generate_recommendations(disease, confidence)
+
+            self.status(f"Prediction completed: {disease} ({confidence:.1f}% confidence)")
+
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid age")
+        except Exception as e:
+            messagebox.showerror("Error", f"Prediction failed: {str(e)}")
+
+    def generate_recommendations(self, disease, confidence):
+        """Generate recommendations based on prediction"""
+        self.recommend_text.delete(1.0, tk.END)
+
+        recommendations = []
+        recommendations.append("📋 RECOMMENDATIONS:\n")
+
+        if confidence < 60:
+            recommendations.append("⚠️ Low confidence prediction. Please:")
+            recommendations.append("   • Consult a doctor for accurate diagnosis")
+            recommendations.append("   • Consider additional medical tests")
+        else:
+            recommendations.append("✓ Based on symptoms analysis:")
+
+        recommendations.append(f"   • Recommended specialist: {self.get_specialist_recommendation(disease)}")
+        recommendations.append("   • Schedule a follow-up appointment")
+        recommendations.append("   • Maintain symptom diary")
+
+        if any([self.symptom_vars['chest_pain_var'].get(),
+                self.symptom_vars['shortness_breath_var'].get()]):
+            recommendations.append("\n⚠️ URGENT: Consider immediate medical attention for chest/breathing symptoms")
+
+        recommendations.append("\n🏥 Next Steps:")
+        recommendations.append("   1. Book an appointment with the recommended specialist")
+        recommendations.append("   2. Share this prediction with your doctor")
+        recommendations.append("   3. Get prescribed medications from the pharmacy")
+
+        self.recommend_text.insert(1.0, "\n".join(recommendations))
+
+    def get_specialist_recommendation(self, disease):
+        """Get specialist recommendation based on disease"""
+        specialist_map = {
+            'Pneumonia': 'Pulmonologist',
+            'Heart Disease': 'Cardiologist',
+            'COVID-19': 'Infectious Disease Specialist',
+            'Asthma': 'Pulmonologist',
+            'Bronchitis': 'Pulmonologist',
+            'Migraine': 'Neurologist',
+            'Hypertension': 'Cardiologist',
+            'Diabetes': 'Endocrinologist',
+            'Gastritis': 'Gastroenterologist',
+            'Common Cold': 'General Physician',
+            'Flu': 'General Physician',
+            'Anxiety': 'Psychiatrist',
+            'Allergy': 'Allergist',
+            'Food Poisoning': 'Gastroenterologist',
+            'Acid Reflux': 'Gastroenterologist'
+        }
+        return specialist_map.get(disease, 'General Physician')
+
+    def save_prediction(self):
+        """Save prediction to patient record"""
+        if not self.patient_id:
+            messagebox.showwarning("Warning", "Please select a patient first")
+            return
+
+        prediction_text = self.prediction_label.cget("text").replace("Predicted Disease: ", "")
+        confidence_text = self.confidence_label.cget("text")
+
+        # Ask for confirmation
+        if messagebox.askyesno("Save Prediction",
+                               f"Save prediction '{prediction_text}' to patient record?\n\n{confidence_text}"):
+            try:
+                # Update patient's disease field
+                run("UPDATE patient_s SET disease=%s WHERE patient_id=%s",
+                    (prediction_text, self.patient_id))
+
+                # Save to prediction history
+                symptoms_summary = ", ".join([s.replace('_var', '') for s, v in self.symptom_vars.items() if v.get()])
+                if not symptoms_summary:
+                    symptoms_summary = "No symptoms reported"
+
+                run("""INSERT INTO prediction_history
+                           (patient_id, predicted_disease, confidence, symptoms, prediction_date)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (self.patient_id, prediction_text, confidence_text, symptoms_summary, date.today()))
+
+                messagebox.showinfo("Success",
+                                    f"Prediction saved to patient record!\nDisease updated to: {prediction_text}")
+                self.status(f"Prediction saved for patient ID: {self.patient_id}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save prediction: {e}")
+
+
+# ── DASHBOARD ─────────────────────────────────────────────────────────
+class DashboardPage(tk.Frame):
+    def __init__(self, parent, show_page_cb=None):
+        super().__init__(parent, bg=NAVY)
+        self._show_page = show_page_cb
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Dashboard Overview", "🏠")
+
+        # ── Quick-action: Predict Disease button at top ──
+        top_bar = tk.Frame(self, bg=NAVY)
+        top_bar.pack(fill="x", padx=18, pady=(0, 6))
+        tk.Button(top_bar, text="🔮  Predict Disease (AI)",
+                  command=lambda: self._show_page("prediction") if self._show_page else None,
+                  bg=ACCENT, fg=NAVY, font=("Segoe UI", 11, "bold"),
+                  relief="flat", cursor="hand2", padx=22, pady=8).pack(side="left")
+
+        try:
+            stats = [
+                ("Patients", run_one("SELECT COUNT(*) FROM patient_s")[0], ACCENT, "👤"),
+                ("Doctors", run_one("SELECT COUNT(*) FROM doctors")[0], TEAL, "👨‍⚕️"),
+                ("Appointments", run_one("SELECT COUNT(*) FROM appointments")[0], ORANGE, "📅"),
+                ("Rooms Avail", run_one("SELECT COUNT(*) FROM rooms WHERE status='Available'")[0], GREEN, "🛏️"),
+                ("Medicines", run_one("SELECT COUNT(*) FROM medicines")[0], PURPLE, "💊"),
+                ("Pending ₹",
+                 f"₹{(run_one('SELECT COALESCE(SUM(total_amount),0) FROM billing WHERE payment_status=\"Pending\"')[0]):,.0f}",
+                 RED, "💰"),
+            ]
+        except Exception as e:
+            tk.Label(self, text=f"DB Error: {e}", bg=NAVY, fg=RED,
+                     font=("Segoe UI", 12)).pack(pady=40)
+            return
+
+        sf = tk.Frame(self, bg=NAVY);
+        sf.pack(fill="x", padx=18, pady=4)
+        for i, (t, v, c, ic) in enumerate(stats):
+            card = tk.Frame(sf, bg=CARD, width=165, height=105,
+                            highlightthickness=1, highlightbackground=c)
+            card.grid(row=0, column=i, padx=7, pady=6, sticky="nsew")
+            card.grid_propagate(False)
+            tk.Label(card, text=ic, bg=CARD, fg=WHITE, font=("Segoe UI", 20)).pack(pady=(10, 0))
+            tk.Label(card, text=str(v), bg=CARD, fg=c,
+                     font=("Segoe UI", 14, "bold")).pack()
+            tk.Label(card, text=t, bg=CARD, fg=SILVER,
+                     font=("Segoe UI", 8)).pack()
+            sf.columnconfigure(i, weight=1)
+
+        # Recent appointments
+        tk.Label(self, text="  Recent Appointments", bg=NAVY, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(12, 2))
+        tree = make_tree(self,
+                         ["ID", "Patient", "Doctor", "Date", "Time", "Status"],
+                         [50, 160, 160, 110, 90, 100])
+        rows = run("""SELECT a.appointment_id,
+                             p.patient_name,
+                             d.doctor_name,
+                             a.appointment_date,
+                             a.appointment_time,
+                             a.status
+                      FROM appointments a
+                               JOIN patient_s p ON a.patient_id = p.patient_id
+                               JOIN doctors d ON a.doctor_id = d.doctor_id
+                      ORDER BY a.appointment_date DESC LIMIT 12""", fetch=True)
+        fill_tree(tree, rows)
+
+        # Billing summary
+        tk.Label(self, text="  Billing Summary", bg=NAVY, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(10, 2))
+        brow = run("""SELECT b.bill_id,
+                             p.patient_name,
+                             b.total_amount,
+                             b.payment_status,
+                             b.bill_date
+                      FROM billing b
+                               JOIN patient_s p ON b.patient_id = p.patient_id
+                      ORDER BY b.bill_date DESC LIMIT 8""", fetch=True)
+        bt = make_tree(self, ["Bill ID", "Patient", "Amount", "Status", "Date"],
+                       [70, 160, 110, 110, 110])
+        fill_tree(bt, brow)
+
+
+# ── PATIENTS ──────────────────────────────────────────────────────────
+class PatientsPage(tk.Frame, CRUDMixin):
+    GENDERS = ["Male", "Female", "Other"]
+    BLOODS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb
+        self._build()
+
+    def _vars(self):
+        return {k: tk.StringVar() for k in
+                ["name", "age", "phone", "address", "gender", "blood", "disease"]}
+
+    def _build(self):
+        page_hdr(self, "Patient Management", "👤")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        # ── form ──
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Patient Details")
+
+        self.v = self._vars()
+        self.date_var = tk.StringVar(value=str(date.today()))
+        self._pid = None  # holds selected patient_id for edit
+
+        flabel(form, "Full Name");
+        ewidget(form, self.v["name"])
+        flabel(form, "Age");
+        ewidget(form, self.v["age"])
+        flabel(form, "Gender");
+        cwidget(form, self.GENDERS, self.v["gender"])
+        flabel(form, "Phone");
+        ewidget(form, self.v["phone"])
+        flabel(form, "Address");
+        ewidget(form, self.v["address"])
+        flabel(form, "Blood Group");
+        cwidget(form, self.BLOODS, self.v["blood"])
+        flabel(form, "Disease / Condition");
+        ewidget(form, self.v["disease"])
+        flabel(form, "Date Registered");
+        dwidget(form, self.date_var)
+
+        self._crud_buttons(form, self._save, self._load_selected,
+                           self._delete, self._clear)
+
+        # ── right ──
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+
+        sf = tk.Frame(right, bg=NAVY);
+        sf.pack(fill="x", padx=6, pady=4)
+        tk.Label(sf, text="Search:", bg=NAVY, fg=SILVER,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.sv = tk.StringVar()
+        se = tk.Entry(sf, textvariable=self.sv, bg=BLUE, fg=WHITE,
+                      insertbackground=ACCENT, width=28,
+                      font=("Segoe UI", 10), relief="flat",
+                      highlightthickness=1, highlightbackground=BORDER,
+                      highlightcolor=ACCENT)
+        se.pack(side="left", padx=5, ipady=4)
+        tk.Button(sf, text="🔍", command=self._load, bg=ACCENT, fg=NAVY,
+                  relief="flat", cursor="hand2", font=("Segoe UI", 9, "bold"),
+                  padx=6).pack(side="left")
+        tk.Button(sf, text="↺", command=lambda: (self.sv.set(""), self._load()),
+                  bg=BLUE, fg=WHITE, relief="flat", cursor="hand2",
+                  padx=6).pack(side="left", padx=3)
+
+        self.tree = make_tree(right,
+                              ["ID", "Name", "Age", "Gender", "Phone", "Address", "Blood", "Disease", "Registered"],
+                              [40, 130, 45, 70, 100, 140, 60, 110, 100])
+        self.tree.bind("<ButtonRelease-1>", lambda e: None)
+        self._load()
+
+    def _load(self):
+        q = self.sv.get() if hasattr(self, "sv") else ""
+        if q:
+            rows = run("""SELECT *
+                          FROM patient_s
+                          WHERE patient_name LIKE %s
+                             OR disease LIKE %s
+                             OR blood_group LIKE %s
+                             OR phone LIKE %s""",
+                       (f"%{q}%",) * 4, fetch=True)
+        else:
+            rows = run("SELECT * FROM patient_s ORDER BY patient_id", fetch=True)
+        fill_tree(self.tree, rows)
+
+    def _save(self):
+        v = self.v
+        try:
+            if self._pid:
+                run("""UPDATE patient_s
+                       SET patient_name=%s,
+                           age=%s,
+                           gender=%s,
+                           phone=%s,
+                           address=%s,
+                           blood_group=%s,
+                           disease=%s,
+                           date_registered=%s
+                       WHERE patient_id = %s""",
+                    (v["name"].get(), v["age"].get(), v["gender"].get(),
+                     v["phone"].get(), v["address"].get(), v["blood"].get(),
+                     v["disease"].get(), self.date_var.get(), self._pid))
+                messagebox.showinfo("Updated", "Patient record updated!")
+                self.status("Patient updated")
+            else:
+                run("""INSERT INTO patient_s
+                       (patient_name, age, gender, phone, address, blood_group, disease, date_registered)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (v["name"].get(), v["age"].get(), v["gender"].get(),
+                     v["phone"].get(), v["address"].get(), v["blood"].get(),
+                     v["disease"].get(), self.date_var.get()))
+                messagebox.showinfo("Saved", "Patient registered!")
+                self.status("Patient saved")
+            self._clear();
+            self._load()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_selected(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        row = self.tree.item(sel[0])["values"]
+        self._pid = row[0]
+        keys = ["name", "age", "gender", "phone", "address", "blood", "disease"]
+        # row: ID,Name,Age,Gender,Phone,Address,Blood,Disease,Registered
+        mapping = [1, 2, 3, 4, 5, 6, 7]
+        for i, k in enumerate(keys):
+            self.v[k].set(row[mapping[i]])
+        self.date_var.set(str(row[8]))
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        pid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("patient"):
+            try:
+                run("DELETE FROM patient_s WHERE patient_id=%s", (pid,))
+                self._clear();
+                self._load()
+                self.status(f"Patient {pid} deleted")
+            except Exception as e:
+                messagebox.showerror("Error (check related records)", str(e))
+
+    def _clear(self):
+        self._pid = None
+        for var in self.v.values(): var.set("")
+        self.date_var.set(str(date.today()))
+
+
+# ── DOCTORS ───────────────────────────────────────────────────────────
+class DoctorsPage(tk.Frame, CRUDMixin):
+    SPECS = ["Cardiologist", "Dermatologist", "Neurologist", "ENT", "Orthopedic",
+             "Pediatrician", "General", "Gynecologist", "Radiologist", "Oncologist",
+             "Psychiatrist", "Urologist", "Gastroenterologist"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Doctor Management", "👨‍⚕️")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Doctor Details")
+
+        self.v = {k: tk.StringVar() for k in ["name", "spec", "phone", "email", "salary"]}
+        self._did = None
+
+        flabel(form, "Doctor Name");
+        ewidget(form, self.v["name"])
+        flabel(form, "Specialization");
+        cwidget(form, self.SPECS, self.v["spec"])
+        flabel(form, "Phone");
+        ewidget(form, self.v["phone"])
+        flabel(form, "Email");
+        ewidget(form, self.v["email"])
+        flabel(form, "Salary (₹)");
+        ewidget(form, self.v["salary"])
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Name", "Specialization", "Phone", "Email", "Salary"],
+                              [40, 160, 140, 110, 190, 90])
+        self._load()
+
+    def _load(self):
+        fill_tree(self.tree,
+                  run("SELECT * FROM doctors ORDER BY doctor_id", fetch=True))
+
+    def _save(self):
+        v = self.v
+        try:
+            if self._did:
+                run("""UPDATE doctors
+                       SET doctor_name=%s,
+                           specialization=%s,
+                           phone=%s,
+                           email=%s,
+                           salary=%s
+                       WHERE doctor_id = %s""",
+                    (v["name"].get(), v["spec"].get(), v["phone"].get(),
+                     v["email"].get(), v["salary"].get(), self._did))
+                messagebox.showinfo("Updated", "Doctor updated!")
+                self.status("Doctor updated")
+            else:
+                run("""INSERT INTO doctors (doctor_name, specialization, phone, email, salary)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (v["name"].get(), v["spec"].get(), v["phone"].get(),
+                     v["email"].get(), v["salary"].get()))
+                messagebox.showinfo("Saved", "Doctor added!")
+                self.status("Doctor saved")
+            self._clear();
+            self._load()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        row = self.tree.item(sel[0])["values"]
+        self._did = row[0]
+        for k, val in zip(["name", "spec", "phone", "email", "salary"], row[1:]):
+            self.v[k].set(val)
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        did = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("doctor"):
+            try:
+                run("DELETE FROM doctors WHERE doctor_id=%s", (did,))
+                self._clear();
+                self._load()
+                self.status(f"Doctor {did} deleted")
+            except Exception as e:
+                messagebox.showerror("Error (check related records)", str(e))
+
+    def _clear(self):
+        self._did = None
+        for var in self.v.values(): var.set("")
+
+
+# ── APPOINTMENTS ──────────────────────────────────────────────────────
+class AppointmentsPage(tk.Frame, CRUDMixin):
+    STATUSES = ["Pending", "Completed", "Cancelled"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Appointment Management", "📅")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Appointment Details")
+
+        patients = run("SELECT patient_id, patient_name FROM patient_s", fetch=True)
+        doctors = run("SELECT doctor_id,  doctor_name  FROM doctors", fetch=True)
+        self.p_map = {f"{r[0]} – {r[1]}": r[0] for r in patients}
+        self.d_map = {f"{r[0]} – {r[1]}": r[0] for r in doctors}
+
+        self.pv = tk.StringVar();
+        self.dv = tk.StringVar()
+        self.tv = tk.StringVar();
+        self.sv = tk.StringVar()
+        self.dvar = tk.StringVar(value=str(date.today()))
+        self._aid = None
+
+        flabel(form, "Patient");
+        cwidget(form, list(self.p_map), self.pv)
+        flabel(form, "Doctor");
+        cwidget(form, list(self.d_map), self.dv)
+        flabel(form, "Date");
+        dwidget(form, self.dvar)
+        flabel(form, "Time (HH:MM)");
+        ewidget(form, self.tv)
+        flabel(form, "Status");
+        cwidget(form, self.STATUSES, self.sv)
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Patient", "Doctor", "Date", "Time", "Status"],
+                              [50, 160, 160, 110, 90, 100])
+        self._load()
+
+    def _load(self):
+        rows = run("""SELECT a.appointment_id,
+                             p.patient_name,
+                             d.doctor_name,
+                             a.appointment_date,
+                             a.appointment_time,
+                             a.status
+                      FROM appointments a
+                               JOIN patient_s p ON a.patient_id = p.patient_id
+                               JOIN doctors d ON a.doctor_id = d.doctor_id
+                      ORDER BY a.appointment_date DESC""", fetch=True)
+        fill_tree(self.tree, rows)
+
+    def _save(self):
+        try:
+            pid = self.p_map[self.pv.get()]
+            did = self.d_map[self.dv.get()]
+            if self._aid:
+                run("""UPDATE appointments
+                       SET patient_id=%s,
+                           doctor_id=%s,
+                           appointment_date=%s,
+                           appointment_time=%s,
+                           status=%s
+                       WHERE appointment_id = %s""",
+                    (pid, did, self.dvar.get(), self.tv.get(), self.sv.get(), self._aid))
+                messagebox.showinfo("Updated", "Appointment updated!")
+                self.status("Appointment updated")
+            else:
+                run("""INSERT INTO appointments
+                           (patient_id, doctor_id, appointment_date, appointment_time, status)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (pid, did, self.dvar.get(), self.tv.get(), self.sv.get()))
+                messagebox.showinfo("Saved", "Appointment booked!")
+                self.status("Appointment saved")
+            self._clear();
+            self._load()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        self._aid = self.tree.item(sel[0])["values"][0]
+        row = run("SELECT * FROM appointments WHERE appointment_id=%s",
+                  (self._aid,), fetch=True)[0]
+        # find keys in maps
+        for k, v in self.p_map.items():
+            if v == row[1]: self.pv.set(k)
+        for k, v in self.d_map.items():
+            if v == row[2]: self.dv.set(k)
+        self.dvar.set(str(row[3]));
+        self.tv.set(str(row[4]));
+        self.sv.set(row[5])
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        aid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("appointment"):
+            run("DELETE FROM appointments WHERE appointment_id=%s", (aid,))
+            self._clear();
+            self._load()
+            self.status(f"Appointment {aid} deleted")
+
+    def _clear(self):
+        self._aid = None
+        for var in [self.pv, self.dv, self.tv, self.sv]: var.set("")
+        self.dvar.set(str(date.today()))
+
+
+# ── MEDICINES ─────────────────────────────────────────────────────────
+class MedicinesPage(tk.Frame, CRUDMixin):
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Medicine Inventory", "💊")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Medicine Details")
+
+        self.v = {k: tk.StringVar() for k in ["name", "company", "price", "stock"]}
+        self.exp_var = tk.StringVar(value=str(date.today()))
+        self._mid = None
+
+        flabel(form, "Medicine Name");
+        ewidget(form, self.v["name"])
+        flabel(form, "Company");
+        ewidget(form, self.v["company"])
+        flabel(form, "Price (₹)");
+        ewidget(form, self.v["price"])
+        flabel(form, "Stock Qty");
+        ewidget(form, self.v["stock"])
+        flabel(form, "Expiry Date");
+        dwidget(form, self.exp_var)
+
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        # Low stock warning panel
+        slabel(form, "⚠️ Low Stock ( < 30 )")
+        self.warn_box = tk.Text(form, bg="#1A0000", fg=ORANGE,
+                                font=("Segoe UI", 8), height=5,
+                                relief="flat", state="disabled")
+        self.warn_box.pack(fill="x", padx=10, pady=2)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Medicine", "Company", "Price", "Stock", "Expiry"],
+                              [50, 170, 130, 80, 70, 110])
+        self._load()
+
+    def _load(self):
+        rows = run("SELECT * FROM medicines ORDER BY medicine_id", fetch=True)
+        fill_tree(self.tree, rows)
+        # warn
+        low = [r for r in rows if int(r[4]) < 30]
+        self.warn_box.config(state="normal")
+        self.warn_box.delete("1.0", "end")
+        for r in low:
+            self.warn_box.insert("end", f"• {r[1]} — qty {r[4]}\n")
+        self.warn_box.config(state="disabled")
+
+    def _save(self):
+        v = self.v
+        try:
+            if self._mid:
+                run("""UPDATE medicines
+                       SET medicine_name=%s,
+                           company=%s,
+                           price=%s,
+                           stock=%s,
+                           expiry_date=%s
+                       WHERE medicine_id = %s""",
+                    (v["name"].get(), v["company"].get(), v["price"].get(),
+                     v["stock"].get(), self.exp_var.get(), self._mid))
+                messagebox.showinfo("Updated", "Medicine updated!")
+            else:
+                run("""INSERT INTO medicines
+                           (medicine_name, company, price, stock, expiry_date)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (v["name"].get(), v["company"].get(), v["price"].get(),
+                     v["stock"].get(), self.exp_var.get()))
+                messagebox.showinfo("Saved", "Medicine added!")
+            self._clear();
+            self._load();
+            self.status("Medicine saved")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        row = self.tree.item(sel[0])["values"]
+        self._mid = row[0]
+        for k, val in zip(["name", "company", "price", "stock"], row[1:5]):
+            self.v[k].set(val)
+        self.exp_var.set(str(row[5]))
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        mid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("medicine"):
+            try:
+                run("DELETE FROM medicines WHERE medicine_id=%s", (mid,))
+                self._clear();
+                self._load()
+            except Exception as e:
+                messagebox.showerror("Error (check prescriptions)", str(e))
+
+    def _clear(self):
+        self._mid = None
+        for var in self.v.values(): var.set("")
+        self.exp_var.set(str(date.today()))
+
+
+# ── PRESCRIPTIONS ─────────────────────────────────────────────────────
+class PrescriptionsPage(tk.Frame, CRUDMixin):
+    DOSAGES = ["2 times daily", "Before food", "After food", "1 tablet daily",
+               "Morning only", "Night only", "Twice daily", "3 times daily",
+               "1 spoon daily", "Before sleep", "As directed"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Prescription Management", "📋")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Prescription Details")
+
+        patients = run("SELECT patient_id, patient_name FROM patient_s", fetch=True)
+        doctors = run("SELECT doctor_id,  doctor_name  FROM doctors", fetch=True)
+        medicines = run("SELECT medicine_id, medicine_name FROM medicines", fetch=True)
+        self.p_map = {f"{r[0]} – {r[1]}": r[0] for r in patients}
+        self.d_map = {f"{r[0]} – {r[1]}": r[0] for r in doctors}
+        self.m_map = {f"{r[0]} – {r[1]}": r[0] for r in medicines}
+
+        self.pv = tk.StringVar();
+        self.dv = tk.StringVar()
+        self.mv = tk.StringVar();
+        self.dosv = tk.StringVar()
+        self.dvar = tk.StringVar(value=str(date.today()))
+        self._prid = None
+
+        flabel(form, "Patient");
+        cwidget(form, list(self.p_map), self.pv)
+        flabel(form, "Doctor");
+        cwidget(form, list(self.d_map), self.dv)
+        flabel(form, "Medicine");
+        cwidget(form, list(self.m_map), self.mv)
+        flabel(form, "Dosage");
+        cwidget(form, self.DOSAGES, self.dosv)
+        flabel(form, "Date");
+        dwidget(form, self.dvar)
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Patient", "Doctor", "Medicine", "Dosage", "Date"],
+                              [50, 140, 140, 140, 130, 100])
+        self._load()
+
+    def _load(self):
+        rows = run("""SELECT pr.prescription_id,
+                             p.patient_name,
+                             d.doctor_name,
+                             m.medicine_name,
+                             pr.dosage,
+                             pr.prescription_date
+                      FROM prescriptions pr
+                               JOIN patient_s p ON pr.patient_id = p.patient_id
+                               JOIN doctors d ON pr.doctor_id = d.doctor_id
+                               JOIN medicines m ON pr.medicine_id = m.medicine_id
+                      ORDER BY pr.prescription_id""", fetch=True)
+        fill_tree(self.tree, rows)
+
+    def _save(self):
+        try:
+            pid = self.p_map[self.pv.get()]
+            did = self.d_map[self.dv.get()]
+            mid = self.m_map[self.mv.get()]
+            if self._prid:
+                run("""UPDATE prescriptions
+                       SET patient_id=%s,
+                           doctor_id=%s,
+                           medicine_id=%s,
+                           dosage=%s,
+                           prescription_date=%s
+                       WHERE prescription_id = %s""",
+                    (pid, did, mid, self.dosv.get(), self.dvar.get(), self._prid))
+                messagebox.showinfo("Updated", "Prescription updated!")
+            else:
+                run("""INSERT INTO prescriptions
+                           (patient_id, doctor_id, medicine_id, dosage, prescription_date)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (pid, did, mid, self.dosv.get(), self.dvar.get()))
+                messagebox.showinfo("Saved", "Prescription saved!")
+            self._clear();
+            self._load();
+            self.status("Prescription saved")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        self._prid = self.tree.item(sel[0])["values"][0]
+        row = run("SELECT * FROM prescriptions WHERE prescription_id=%s",
+                  (self._prid,), fetch=True)[0]
+        for k, v in self.p_map.items():
+            if v == row[1]: self.pv.set(k)
+        for k, v in self.d_map.items():
+            if v == row[2]: self.dv.set(k)
+        for k, v in self.m_map.items():
+            if v == row[3]: self.mv.set(k)
+        self.dosv.set(row[4]);
+        self.dvar.set(str(row[5]))
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        prid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("prescription"):
+            run("DELETE FROM prescriptions WHERE prescription_id=%s", (prid,))
+            self._clear();
+            self._load()
+
+    def _clear(self):
+        self._prid = None
+        for var in [self.pv, self.dv, self.mv, self.dosv]: var.set("")
+        self.dvar.set(str(date.today()))
+
+
+# ── ROOMS ─────────────────────────────────────────────────────────────
+class RoomsPage(tk.Frame, CRUDMixin):
+    TYPES = ["General", "ICU", "Deluxe", "Private", "Semi-Private", "Isolation"]
+    STATUSES = ["Available", "Occupied", "Maintenance", "Reserved"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Room Management", "🛏️")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Room Details")
+
+        self.rv = tk.StringVar();
+        self.rtv = tk.StringVar();
+        self.sv = tk.StringVar()
+        self._rid = None
+
+        flabel(form, "Room Number");
+        ewidget(form, self.rv)
+        flabel(form, "Room Type");
+        cwidget(form, self.TYPES, self.rtv)
+        flabel(form, "Status");
+        cwidget(form, self.STATUSES, self.sv)
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        # room stats
+        slabel(form, "Room Summary")
+        self.stat_frame = tk.Frame(form, bg=CARD)
+        self.stat_frame.pack(fill="x", padx=10)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Room No", "Type", "Status"], [60, 120, 140, 130])
+        self._load()
+
+    def _load(self):
+        rows = run("SELECT * FROM rooms ORDER BY room_id", fetch=True)
+        fill_tree(self.tree, rows)
+        # stats
+        for w in self.stat_frame.winfo_children(): w.destroy()
+        for status, col in [("Available", GREEN), ("Occupied", RED), ("Maintenance", ORANGE)]:
+            cnt = run_one(f"SELECT COUNT(*) FROM rooms WHERE status='{status}'")[0]
+            f2 = tk.Frame(self.stat_frame, bg=CARD);
+            f2.pack(fill="x", pady=1)
+            tk.Label(f2, text=status, bg=CARD, fg=SILVER, font=("Segoe UI", 8)).pack(side="left")
+            tk.Label(f2, text=str(cnt), bg=CARD, fg=col,
+                     font=("Segoe UI", 9, "bold")).pack(side="right")
+
+    def _save(self):
+        try:
+            if self._rid:
+                run("UPDATE rooms SET room_number=%s,room_type=%s,status=%s WHERE room_id=%s",
+                    (self.rv.get(), self.rtv.get(), self.sv.get(), self._rid))
+                messagebox.showinfo("Updated", "Room updated!")
+            else:
+                run("INSERT INTO rooms (room_number,room_type,status) VALUES (%s,%s,%s)",
+                    (self.rv.get(), self.rtv.get(), self.sv.get()))
+                messagebox.showinfo("Saved", "Room added!")
+            self._clear();
+            self._load();
+            self.status("Room saved")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        row = self.tree.item(sel[0])["values"]
+        self._rid = row[0];
+        self.rv.set(row[1]);
+        self.rtv.set(row[2]);
+        self.sv.set(row[3])
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        rid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("room"):
+            try:
+                run("DELETE FROM rooms WHERE room_id=%s", (rid,))
+                self._clear();
+                self._load()
+            except Exception as e:
+                messagebox.showerror("Error (check admissions)", str(e))
+
+    def _clear(self):
+        self._rid = None
+        self.rv.set("");
+        self.rtv.set("");
+        self.sv.set("")
+
+
+# ── ADMISSIONS ────────────────────────────────────────────────────────
+class AdmissionsPage(tk.Frame, CRUDMixin):
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Admission Management", "🏨")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Admission Details")
+
+        patients = run("SELECT patient_id, patient_name FROM patient_s", fetch=True)
+        rooms = run("SELECT room_id, room_number, room_type, status FROM rooms", fetch=True)
+        self.p_map = {f"{r[0]} – {r[1]}": r[0] for r in patients}
+        self.r_map = {f"{r[0]} – {r[1]} ({r[2]}) [{r[3]}]": r[0] for r in rooms}
+
+        self.pv = tk.StringVar();
+        self.rv = tk.StringVar()
+        self.adv = tk.StringVar(value=str(date.today()))
+        self.ddv = tk.StringVar(value=str(date.today()))
+        self._adid = None
+
+        flabel(form, "Patient");
+        cwidget(form, list(self.p_map), self.pv)
+        flabel(form, "Room");
+        cwidget(form, list(self.r_map), self.rv)
+        flabel(form, "Admission Date");
+        dwidget(form, self.adv)
+        flabel(form, "Discharge Date");
+        dwidget(form, self.ddv)
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["ID", "Patient", "Room", "Admission", "Discharge"],
+                              [50, 170, 160, 110, 110])
+        self._load()
+
+    def _load(self):
+        rows = run("""SELECT ad.admission_id,
+                             p.patient_name,
+                             CONCAT(r.room_number, ' – ', r.room_type),
+                             ad.admission_date,
+                             ad.discharge_date
+                      FROM admissions ad
+                               JOIN patient_s p ON ad.patient_id = p.patient_id
+                               JOIN rooms r ON ad.room_id = r.room_id
+                      ORDER BY ad.admission_id""", fetch=True)
+        fill_tree(self.tree, rows)
+
+    def _save(self):
+        try:
+            pid = self.p_map[self.pv.get()]
+            rid = self.r_map[self.rv.get()]
+            if self._adid:
+                run("""UPDATE admissions
+                       SET patient_id=%s,
+                           room_id=%s,
+                           admission_date=%s,
+                           discharge_date=%s
+                       WHERE admission_id = %s""",
+                    (pid, rid, self.adv.get(), self.ddv.get(), self._adid))
+                messagebox.showinfo("Updated", "Admission updated!")
+            else:
+                run("""INSERT INTO admissions
+                           (patient_id, room_id, admission_date, discharge_date)
+                       VALUES (%s, %s, %s, %s)""",
+                    (pid, rid, self.adv.get(), self.ddv.get()))
+                run("UPDATE rooms SET status='Occupied' WHERE room_id=%s", (rid,))
+                messagebox.showinfo("Saved", "Patient admitted!")
+            self._clear();
+            self._load();
+            self.status("Admission saved")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        self._adid = self.tree.item(sel[0])["values"][0]
+        row = run("SELECT * FROM admissions WHERE admission_id=%s",
+                  (self._adid,), fetch=True)[0]
+        for k, v in self.p_map.items():
+            if v == row[1]: self.pv.set(k)
+        for k, v in self.r_map.items():
+            if v == row[2]: self.rv.set(k)
+        self.adv.set(str(row[3]));
+        self.ddv.set(str(row[4]))
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        adid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("admission"):
+            run("DELETE FROM admissions WHERE admission_id=%s", (adid,))
+            self._clear();
+            self._load()
+
+    def _clear(self):
+        self._adid = None
+        self.pv.set("");
+        self.rv.set("")
+        self.adv.set(str(date.today()));
+        self.ddv.set(str(date.today()))
+
+
+# ── BILLING ───────────────────────────────────────────────────────────
+class BillingPage(tk.Frame, CRUDMixin):
+    STATUSES = ["Paid", "Pending", "Partial", "Waived"]
+
+    def __init__(self, parent, status_cb):
+        super().__init__(parent, bg=NAVY)
+        self.status = status_cb;
+        self._build()
+
+    def _build(self):
+        page_hdr(self, "Billing & Receipts", "💰")
+        main = tk.Frame(self, bg=NAVY);
+        main.pack(fill="both", expand=True)
+
+        form = tk.Frame(main, bg=CARD, width=285)
+        form.pack(side="left", fill="y", padx=(8, 0), pady=4)
+        form.pack_propagate(False)
+        slabel(form, "Bill Details")
+
+        patients = run("SELECT patient_id, patient_name FROM patient_s", fetch=True)
+        self.p_map = {f"{r[0]} – {r[1]}": r[0] for r in patients}
+        self.pv = tk.StringVar();
+        self.amtv = tk.StringVar();
+        self.psv = tk.StringVar()
+        self.dvar = tk.StringVar(value=str(date.today()))
+        self._bid = None
+
+        flabel(form, "Patient");
+        cwidget(form, list(self.p_map), self.pv)
+        flabel(form, "Total Amount (₹)");
+        ewidget(form, self.amtv)
+        flabel(form, "Payment Status");
+        cwidget(form, self.STATUSES, self.psv)
+        flabel(form, "Bill Date");
+        dwidget(form, self.dvar)
+        self._crud_buttons(form, self._save, self._load_sel, self._delete, self._clear)
+
+        btn(form, "🖨️  Print PDF Receipt", self._receipt, PURPLE, WHITE)
+
+        # Summary section
+        slabel(form, "Financial Summary")
+        self.sum_frame = tk.Frame(form, bg=CARD);
+        self.sum_frame.pack(fill="x", padx=10)
+
+        right = tk.Frame(main, bg=NAVY)
+        right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.tree = make_tree(right,
+                              ["Bill ID", "Patient", "Amount (₹)", "Status", "Date"],
+                              [70, 170, 110, 110, 110])
+        self._load()
+
+    def _load(self):
+        rows = run("""SELECT b.bill_id,
+                             p.patient_name,
+                             b.total_amount,
+                             b.payment_status,
+                             b.bill_date
+                      FROM billing b
+                               JOIN patient_s p ON b.patient_id = p.patient_id
+                      ORDER BY b.bill_date DESC""", fetch=True)
+        fill_tree(self.tree, rows)
+        # summary
+        for w in self.sum_frame.winfo_children(): w.destroy()
+        for label, sql, col in [
+            ("Total Revenue", "SELECT COALESCE(SUM(total_amount),0) FROM billing", ACCENT),
+            ("Collected (Paid)", "SELECT COALESCE(SUM(total_amount),0) FROM billing WHERE payment_status='Paid'",
+             GREEN),
+            ("Pending", "SELECT COALESCE(SUM(total_amount),0) FROM billing WHERE payment_status='Pending'", RED),
+            ("Partial", "SELECT COALESCE(SUM(total_amount),0) FROM billing WHERE payment_status='Partial'", ORANGE),
+        ]:
+            val = run_one(sql)[0]
+            f2 = tk.Frame(self.sum_frame, bg=CARD);
+            f2.pack(fill="x", pady=1)
+            tk.Label(f2, text=label, bg=CARD, fg=SILVER, font=("Segoe UI", 8)).pack(side="left")
+            tk.Label(f2, text=f"₹{val:,.2f}", bg=CARD, fg=col,
+                     font=("Segoe UI", 9, "bold")).pack(side="right")
+
+    def _save(self):
+        try:
+            pid = self.p_map[self.pv.get()]
+            if self._bid:
+                run("""UPDATE billing
+                       SET patient_id=%s,
+                           total_amount=%s,
+                           payment_status=%s,
+                           bill_date=%s
+                       WHERE bill_id = %s""",
+                    (pid, self.amtv.get(), self.psv.get(), self.dvar.get(), self._bid))
+                messagebox.showinfo("Updated", "Bill updated!")
+            else:
+                run("""INSERT INTO billing
+                           (patient_id, total_amount, payment_status, bill_date)
+                       VALUES (%s, %s, %s, %s)""",
+                    (pid, self.amtv.get(), self.psv.get(), self.dvar.get()))
+                messagebox.showinfo("Saved", "Bill added!")
+            self._clear();
+            self._load();
+            self.status("Bill saved")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _load_sel(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        row = self.tree.item(sel[0])["values"]
+        self._bid = row[0]
+        # Find patient in map
+        for k, v in self.p_map.items():
+            if row[1] in k:
+                self.pv.set(k)
+                break
+        self.amtv.set(row[2]);
+        self.psv.set(row[3]);
+        self.dvar.set(str(row[4]))
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel: return self._no_selection()
+        bid = self.tree.item(sel[0])["values"][0]
+        if self._confirm_delete("bill"):
+            run("DELETE FROM billing WHERE bill_id=%s", (bid,))
+            self._clear();
+            self._load()
+
+    def _receipt(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Select a bill row first")
+            return
+        row = self.tree.item(sel[0])["values"]
+        pid_match = run_one("SELECT patient_id FROM billing WHERE bill_id=%s", (row[0],))
+        bill_data = {"bill_id": row[0], "patient_id": pid_match[0] if pid_match else "–",
+                     "total_amount": float(str(row[2]).replace(",", "")),
+                     "payment_status": row[3], "bill_date": row[4]}
+        path = os.path.join(os.path.expanduser("~"), f"receipt_{row[0]}.pdf")
+        try:
+            gen_receipt(bill_data, path)
+            messagebox.showinfo("Receipt Ready", f"Saved to:\n{path}")
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.call(["open", path])
+            else:
+                subprocess.call(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror("PDF Error", str(e))
+
+    def _clear(self):
+        self._bid = None
+        self.pv.set("");
+        self.amtv.set("");
+        self.psv.set("")
+        self.dvar.set(str(date.today()))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MAIN APPLICATION WINDOW
+# ══════════════════════════════════════════════════════════════════════
+class HospitalApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("MediCare – Hospital Management System with AI Prediction")
+        self.state("zoomed")
+        self.configure(bg=NAVY)
+        _ttk_style()
+        self._pages = {}
+        self._active_nav = None
+        self._build_header()
+        self._build_body()
+        self._build_statusbar()
+        self.show_page("dashboard")
+
+    # ── Header ──────────────────────────────────────────────────────
+    def _build_header(self):
+        hdr = tk.Frame(self, bg=BLUE, height=58)
+        hdr.pack(fill="x");
+        hdr.pack_propagate(False)
+
+        tk.Label(hdr, text="🏥", bg=BLUE, fg=ACCENT,
+                 font=("Segoe UI", 20)).pack(side="left", padx=(16, 4), pady=6)
+        tk.Label(hdr, text="MediCare  Hospital Management System  |  AI-Powered Predictions",
+                 bg=BLUE, fg=WHITE,
+                 font=("Segoe UI", 15, "bold")).pack(side="left", pady=6)
+
+        self._time_var = tk.StringVar()
+        tk.Label(hdr, textvariable=self._time_var,
+                 bg=BLUE, fg=SILVER, font=("Segoe UI", 9)).pack(side="right", padx=18)
+        self._tick()
+
+    def _tick(self):
+        self._time_var.set(datetime.now().strftime("  %A  %d %b %Y  │  %H:%M:%S  "))
+        self.after(1000, self._tick)
+
+    # ── Sidebar + Content ───────────────────────────────────────────
+    def _build_body(self):
+        body = tk.Frame(self, bg=NAVY);
+        body.pack(fill="both", expand=True)
+
+        # Sidebar
+        self.sidebar = tk.Frame(body, bg=CARD, width=200)
+        self.sidebar.pack(side="left", fill="y");
+        self.sidebar.pack_propagate(False)
+
+        tk.Label(self.sidebar, text="M E N U", bg=CARD, fg=SUBTEXT,
+                 font=("Segoe UI", 8, "bold")).pack(pady=(16, 6))
+
+        self._nav_buttons = {}
+        nav = [("🏠  Dashboard", "dashboard"),
+               ("👤  Patients", "patients"),
+               ("👨‍⚕️  Doctors", "doctors"),
+               ("📅  Appointments", "appointments"),
+               ("💊  Medicines", "medicines"),
+               ("📋  Prescriptions", "prescriptions"),
+               ("🛏️  Rooms", "rooms"),
+               ("🏨  Admissions", "admissions"),
+               ("💰  Billing", "billing"),
+               ("🔮  Disease Predictor", "prediction")]  # New prediction menu item
+
+        for label, key in nav:
+            b = tk.Button(self.sidebar, text=label,
+                          command=lambda k=key: self.show_page(k),
+                          bg=CARD, fg=WHITE, font=("Segoe UI", 10),
+                          relief="flat", bd=0, cursor="hand2",
+                          activebackground=BLUE, activeforeground=ACCENT,
+                          anchor="w", padx=16, pady=10)
+            b.pack(fill="x")
+            self._nav_buttons[key] = b
+
+        # Logout
+        tk.Frame(self.sidebar, bg=BORDER, height=1).pack(fill="x", pady=8)
+        tk.Button(self.sidebar, text="🚪  Logout",
+                  command=self._logout,
+                  bg=CARD, fg=RED, font=("Segoe UI", 10),
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground="#2A0A0A", activeforeground=RED,
+                  anchor="w", padx=16, pady=10).pack(fill="x")
+
+        # Content
+        self.content = tk.Frame(body, bg=NAVY)
+        self.content.pack(side="left", fill="both", expand=True)
+
+    def _build_statusbar(self):
+        self.status_var = tk.StringVar(value="  Ready")
+        bar = tk.Frame(self, bg=BLUE, height=24);
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        tk.Label(bar, textvariable=self.status_var, bg=BLUE, fg=SILVER,
+                 font=("Segoe UI", 8), anchor="w").pack(side="left", padx=12)
+        tk.Label(bar, text="MediCare HMS  v3.0  |  AI Disease Prediction Active",
+                 bg=BLUE, fg=SUBTEXT, font=("Segoe UI", 8)).pack(side="right", padx=12)
+
+    def set_status(self, msg):
+        self.status_var.set(f"  ✔  {msg}  –  {datetime.now().strftime('%H:%M:%S')}")
+
+    def show_page(self, key):
+        # Update nav highlight
+        if self._active_nav:
+            self._nav_buttons[self._active_nav].config(bg=CARD, fg=TEXT)
+        self._nav_buttons[key].config(bg=BLUE, fg=ACCENT)
+        self._active_nav = key
+
+        # Clear content
+        for w in self.content.winfo_children(): w.destroy()
+
+        page_map = {
+            "dashboard": lambda: DashboardPage(self.content, self.show_page),
+            "patients": lambda: PatientsPage(self.content, self.set_status),
+            "doctors": lambda: DoctorsPage(self.content, self.set_status),
+            "appointments": lambda: AppointmentsPage(self.content, self.set_status),
+            "medicines": lambda: MedicinesPage(self.content, self.set_status),
+            "prescriptions": lambda: PrescriptionsPage(self.content, self.set_status),
+            "rooms": lambda: RoomsPage(self.content, self.set_status),
+            "admissions": lambda: AdmissionsPage(self.content, self.set_status),
+            "billing": lambda: BillingPage(self.content, self.set_status),
+            "prediction": lambda: DiseasePredictionPage(self.content, self.set_status),
+        }
+        page = page_map[key]()
+        page.pack(fill="both", expand=True)
+
+    def _logout(self):
+        if messagebox.askyesno("Logout", "Return to login screen?"):
+            self.destroy()
+            LoginScreen().mainloop()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  LOGIN SCREEN  – full image background
+# ══════════════════════════════════════════════════════════════════════
+class LoginScreen(tk.Tk):
+    W, H = 1100, 680
+
+    def __init__(self):
+        super().__init__()
+        self.title("MediCare Hospital – Login with AI")
+        sw = self.winfo_screenwidth();
+        sh = self.winfo_screenheight()
+        x = (sw - self.W) // 2;
+        y = (sh - self.H) // 2
+        self.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self.resizable(False, False)
+        self._build()
+
+    def _build(self):
+        # Generate and display background image
+        raw_bg = make_login_bg(self.W, self.H)
+        self._bg = ImageTk.PhotoImage(raw_bg)
+
+        canvas = tk.Canvas(self, width=self.W, height=self.H,
+                           highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        canvas.create_image(0, 0, anchor="nw", image=self._bg)
+
+        # Left hero text on canvas
+        canvas.create_text(90, 230, text="MediCare", anchor="nw",
+                           font=("Segoe UI", 52, "bold"),
+                           fill="#00C2FF")
+        canvas.create_text(90, 300, text="Hospital Management", anchor="nw",
+                           font=("Segoe UI", 22), fill="#B0C8F0")
+        canvas.create_text(90, 335, text="System", anchor="nw",
+                           font=("Segoe UI", 22), fill="#B0C8F0")
+        canvas.create_line(90, 375, 420, 375, fill="#00C2FF", width=2)
+        canvas.create_text(90, 390, text="Professional  ·  Secure  ·  Reliable",
+                           anchor="nw", font=("Segoe UI", 12), fill="#78909C")
+        canvas.create_text(90, 415, text="Complete Patient & Hospital Administration",
+                           anchor="nw", font=("Segoe UI", 11), fill="#546E7A")
+        canvas.create_text(90, 440, text="AI-Powered Disease Prediction",
+                           anchor="nw", font=("Segoe UI", 11, "bold"), fill="#00C2FF")
+
+        # Right login card (using a Frame on top of canvas)
+        card_x = self.W - 340;
+        card_y = 90
+        card = tk.Frame(self, bg="#0A1628", padx=36, pady=36,
+                        highlightthickness=1,
+                        highlightbackground="#00C2FF")
+        card.place(x=card_x, y=card_y, width=310, height=500)
+
+        # Hospital icon
+        tk.Label(card, text="🏥", bg="#0A1628", fg="#00C2FF",
+                 font=("Segoe UI", 34)).pack(pady=(0, 4))
+        tk.Label(card, text="Welcome Back", bg="#0A1628", fg="#F0F4FF",
+                 font=("Segoe UI", 17, "bold")).pack()
+        tk.Label(card, text="Sign in to your account", bg="#0A1628", fg="#78909C",
+                 font=("Segoe UI", 10)).pack(pady=(0, 18))
+
+        # Divider
+        tk.Frame(card, bg="#00C2FF", height=2).pack(fill="x", pady=(0, 18))
+
+        # Username
+        tk.Label(card, text="Username", bg="#0A1628", fg="#B0BEC5",
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        self.uv = tk.StringVar()
+        ue = tk.Entry(card, textvariable=self.uv, bg="#132244", fg="#F0F4FF",
+                      insertbackground="#00C2FF", width=26,
+                      font=("Segoe UI", 11), relief="flat",
+                      highlightthickness=1, highlightbackground="#1E3A6E",
+                      highlightcolor="#00C2FF")
+        ue.pack(fill="x", ipady=7, pady=(2, 14))
+
+        # Password
+        tk.Label(card, text="Password", bg="#0A1628", fg="#B0BEC5",
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        self.pv = tk.StringVar()
+        pe = tk.Entry(card, textvariable=self.pv, show="●",
+                      bg="#132244", fg="#F0F4FF",
+                      insertbackground="#00C2FF", width=26,
+                      font=("Segoe UI", 11), relief="flat",
+                      highlightthickness=1, highlightbackground="#1E3A6E",
+                      highlightcolor="#00C2FF")
+        pe.pack(fill="x", ipady=7, pady=(2, 22))
+
+        # Login button
+        login_btn = tk.Button(card, text="  LOGIN  →",
+                              command=self._login,
+                              bg="#00C2FF", fg="#0A1628",
+                              font=("Segoe UI", 12, "bold"),
+                              relief="flat", cursor="hand2",
+                              activebackground="#00897B",
+                              activeforeground="#F0F4FF",
+                              padx=20, pady=10)
+        login_btn.pack(fill="x")
+
+        # Error label
+        self.err = tk.Label(card, text="", bg="#0A1628", fg="#E53935",
+                            font=("Segoe UI", 9))
+        self.err.pack(pady=(8, 0))
+
+        # Hint
+        tk.Label(card, text="Default: admin / admin123", bg="#0A1628",
+                 fg="#455A64", font=("Segoe UI", 8)).pack(pady=(14, 0))
+
+        # Keyboard bindings
+        ue.bind("<Return>", lambda e: pe.focus())
+        pe.bind("<Return>", lambda e: self._login())
+        ue.focus()
+
+    def _login(self):
+        u = self.uv.get().strip();
+        p = self.pv.get().strip()
+        try:
+            rows = run("SELECT * FROM users WHERE username=%s AND password=%s",
+                       (u, p), fetch=True)
+            if rows:
+                self.destroy()
+                app = HospitalApp()
+                app.mainloop()
+            else:
+                self.err.config(text="✗  Invalid username or password")
+                self.pv.set("")
+        except Exception as e:
+            self.err.config(text=f"DB Error: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  CREATE TABLES IF NOT EXISTS (run once)
+# ──────────────────────────────────────────────────────────────────────
+def init_database():
+    """Initialize database tables if they don't exist"""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Create users table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS users
+                (
+                    user_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    username
+                    VARCHAR
+                (
+                    50
+                ) UNIQUE NOT NULL,
+                    password VARCHAR
+                (
+                    255
+                ) NOT NULL,
+                    role VARCHAR
+                (
+                    50
+                ) DEFAULT 'staff'
+                    )
+                """)
+
+    # Create patient_s table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS patient_s
+                (
+                    patient_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_name
+                    VARCHAR
+                (
+                    100
+                ) NOT NULL,
+                    age INT,
+                    gender VARCHAR
+                (
+                    10
+                ),
+                    phone VARCHAR
+                (
+                    15
+                ),
+                    address TEXT,
+                    blood_group VARCHAR
+                (
+                    5
+                ),
+                    disease VARCHAR
+                (
+                    100
+                ),
+                    date_registered DATE
+                    )
+                """)
+
+    # Create doctors table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS doctors
+                (
+                    doctor_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    doctor_name
+                    VARCHAR
+                (
+                    100
+                ) NOT NULL,
+                    specialization VARCHAR
+                (
+                    100
+                ),
+                    phone VARCHAR
+                (
+                    15
+                ),
+                    email VARCHAR
+                (
+                    100
+                ),
+                    salary DECIMAL
+                (
+                    10,
+                    2
+                )
+                    )
+                """)
+
+    # Create appointments table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS appointments
+                (
+                    appointment_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_id
+                    INT,
+                    doctor_id
+                    INT,
+                    appointment_date
+                    DATE,
+                    appointment_time
+                    TIME,
+                    status
+                    VARCHAR
+                (
+                    50
+                ),
+                    FOREIGN KEY
+                (
+                    patient_id
+                ) REFERENCES patient_s
+                (
+                    patient_id
+                ),
+                    FOREIGN KEY
+                (
+                    doctor_id
+                ) REFERENCES doctors
+                (
+                    doctor_id
+                )
+                    )
+                """)
+
+    # Create medicines table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS medicines
+                (
+                    medicine_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    medicine_name
+                    VARCHAR
+                (
+                    100
+                ) NOT NULL,
+                    company VARCHAR
+                (
+                    100
+                ),
+                    price DECIMAL
+                (
+                    10,
+                    2
+                ),
+                    stock INT,
+                    expiry_date DATE
+                    )
+                """)
+
+    # Create rooms table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS rooms
+                (
+                    room_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    room_number
+                    VARCHAR
+                (
+                    10
+                ) UNIQUE,
+                    room_type VARCHAR
+                (
+                    50
+                ),
+                    status VARCHAR
+                (
+                    20
+                )
+                    )
+                """)
+
+    # Create admissions table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS admissions
+                (
+                    admission_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_id
+                    INT,
+                    room_id
+                    INT,
+                    admission_date
+                    DATE,
+                    discharge_date
+                    DATE,
+                    FOREIGN
+                    KEY
+                (
+                    patient_id
+                ) REFERENCES patient_s
+                (
+                    patient_id
+                ),
+                    FOREIGN KEY
+                (
+                    room_id
+                ) REFERENCES rooms
+                (
+                    room_id
+                )
+                    )
+                """)
+
+    # Create billing table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS billing
+                (
+                    bill_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_id
+                    INT,
+                    total_amount
+                    DECIMAL
+                (
+                    10,
+                    2
+                ),
+                    payment_status VARCHAR
+                (
+                    20
+                ),
+                    bill_date DATE,
+                    FOREIGN KEY
+                (
+                    patient_id
+                ) REFERENCES patient_s
+                (
+                    patient_id
+                )
+                    )
+                """)
+
+    # Create prescriptions table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS prescriptions
+                (
+                    prescription_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_id
+                    INT,
+                    doctor_id
+                    INT,
+                    medicine_id
+                    INT,
+                    dosage
+                    VARCHAR
+                (
+                    100
+                ),
+                    prescription_date DATE,
+                    FOREIGN KEY
+                (
+                    patient_id
+                ) REFERENCES patient_s
+                (
+                    patient_id
+                ),
+                    FOREIGN KEY
+                (
+                    doctor_id
+                ) REFERENCES doctors
+                (
+                    doctor_id
+                ),
+                    FOREIGN KEY
+                (
+                    medicine_id
+                ) REFERENCES medicines
+                (
+                    medicine_id
+                )
+                    )
+                """)
+
+    # Create disease_training_data table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS disease_training_data
+                (
+                    id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    age
+                    INT,
+                    gender
+                    VARCHAR
+                (
+                    10
+                ),
+                    fever INT,
+                    cough INT,
+                    headache INT,
+                    fatigue INT,
+                    chest_pain INT,
+                    shortness_breath INT,
+                    nausea INT,
+                    disease_name VARCHAR
+                (
+                    100
+                )
+                    )
+                """)
+
+    # Create prediction_history table
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS prediction_history
+                (
+                    prediction_id
+                    INT
+                    AUTO_INCREMENT
+                    PRIMARY
+                    KEY,
+                    patient_id
+                    INT,
+                    predicted_disease
+                    VARCHAR
+                (
+                    100
+                ),
+                    confidence VARCHAR
+                (
+                    50
+                ),
+                    symptoms TEXT,
+                    prediction_date DATE,
+                    FOREIGN KEY
+                (
+                    patient_id
+                ) REFERENCES patient_s
+                (
+                    patient_id
+                )
+                    )
+                """)
+
+    # Insert default admin user if not exists
+    cur.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+    if cur.fetchone()[0] == 0:
+        cur.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
+                    ('admin', 'admin123', 'admin'))
+
+    # Insert sample rooms if empty
+    cur.execute("SELECT COUNT(*) FROM rooms")
+    if cur.fetchone()[0] == 0:
+        sample_rooms = [
+            ('101', 'General', 'Available'),
+            ('102', 'General', 'Available'),
+            ('201', 'Deluxe', 'Available'),
+            ('202', 'Deluxe', 'Available'),
+            ('301', 'ICU', 'Available'),
+            ('302', 'ICU', 'Available'),
+            ('401', 'Private', 'Available'),
+            ('402', 'Private', 'Available')
+        ]
+        cur.executemany("INSERT INTO rooms (room_number, room_type, status) VALUES (%s, %s, %s)", sample_rooms)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("Database initialized successfully!")
+
+
+# Initialize database on startup
+try:
+    init_database()
+except Exception as e:
+    print(f"Database initialization warning: {e}")
+
+
+
+# ──────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    LoginScreen().mainloop()
